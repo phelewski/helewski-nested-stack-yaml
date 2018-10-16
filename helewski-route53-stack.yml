@@ -1,0 +1,29 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Helewski Nested Route53 Stack'
+Parameters:
+  PublicHostedZoneName:
+    Description: 'The name of the domain (hosted zone).'
+    Type: String
+    Default: 'helewski.com'
+Resources:
+  PublicHostedZone:
+    Type: 'AWS::Route53::HostedZone'
+    Properties:
+      HostedZoneConfig:
+        Comment: !Sub "${PublicHostedZoneName} public DNS zone"
+      Name: !Ref PublicHostedZoneName
+Outputs:
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
+  PublicHostedZoneName:
+    Description: 'The name of the hosted zone.'
+    Value: !Ref PublicHostedZoneName
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicHostedZoneName'
+  PublicHostedZoneId:
+    Description: 'The ID of the hosted zone.'
+    Value: !Ref PublicHostedZone
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicHostedZoneId'
