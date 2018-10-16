@@ -1,0 +1,686 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Helewski Nested Backend Stack
+Parameters:
+  EnvironmentName:
+    Type: String
+  VpcId:
+    Type: String
+  SubnetAPublic:
+    Type: String
+  SubnetBPublic:
+    Type: String
+  SubnetCPublic:
+    Type: String
+  CloudFrontAcmCertificate:
+    Description: 'The ACM Certificate ARN for the CloudFront distribution. Must be created in the us-east-1 region!'
+    Type: String
+    Default: arn:aws:acm:us-east-1:532066172067:certificate/86ed327e-3041-4495-89d1-c929e2567a8e
+  ElbAcmCertificate:
+    Description: 'The ACM Certificate ARN for the ELB. Must be created in the same region as this stack!'
+    Type: String
+    Default: arn:aws:acm:us-east-1:532066172067:certificate/86ed327e-3041-4495-89d1-c929e2567a8e
+  BlogTitle:
+    Description: 'The title of the WordPress blog.'
+    Type: String
+    Default: 'Peter TK blog'
+  BlogAdminUsername:
+    Description: 'A username for the WordPress admin.'
+    Type: String
+    Default: admin
+  BlogAdminPassword:
+    Description: 'A password for the WordPress admin.'
+    Type: String
+    Default: adminpassword
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 32
+  BlogAdminEMail:
+    Description: 'The email address of the WordPress admin.'
+    Type: String
+    Default: 'admin@peter-testing-tk.com'
+  WebServerKeyName:
+    Description: 'key pair of the ec2-user to establish a SSH connection to the web server.'
+    Type: String
+    Default: 'test-key-pair'
+  WebServerSystemsManagerAccess:
+    Description: 'Enable AWS Systems Manager agent and authorization.'
+    Type: String
+    Default: true
+    AllowedValues:
+    - true
+    - false
+  WebServerInstanceType:
+    Description: 'The instance type of web servers (e.g. t2.micro).'
+    Type: String
+    Default: 't2.micro'
+  WebServerLogsRetentionInDays:
+    Description: 'Specifies the number of days you want to retain log events.'
+    Type: Number
+    Default: 3
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+  DBMasterUserPassword:
+    Description: 'The master password for the DB instance. Must not be changed!'
+    Type: String
+    Default: wordpress
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 32
+  BastionSecurityGroup:
+    Type: String
+  PublicHostedZoneName:
+    Type: String
+  PublicHostedZoneId:
+    Type: String
+  SubDomainNameWithDot:
+    Description: 'Name that is used to create the DNS entry with trailing dot, e.g. ${SubDomainNameWithDot}${PublicHostedZoneName}. Leave blank for naked (or apex and bare) domain.'
+    Type: String
+    Default: 'www.'
+Mappings:
+  RegionMap:
+    'us-east-1':
+      AMI: 'ami-0922553b7b0369273'
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref WebServerKeyName, '']]
+  HasSystemsManagerAccess: !Equals [!Ref WebServerSystemsManagerAccess, 'true']
+Resources:
+  WebServerLogs:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      RetentionInDays: !Ref WebServerLogsRetentionInDays
+  LoadBalancerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'tk-wordpress-elb'
+      VpcId: !Ref VpcId
+  LoadBalancerSecurityGroupInWorld:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: '0.0.0.0/0'
+  WebServerSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'wordpress-ec2'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - FromPort: 80
+        IpProtocol: tcp
+        SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+        ToPort: 80
+  WebServerSecurityGroupInSSHBastion:
+    Type: 'AWS::EC2::SecurityGroupIngress'
+    Properties:
+      GroupId: !Ref WebServerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !Ref BastionSecurityGroup
+  LoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Subnets:
+      - !Ref SubnetAPublic
+      - !Ref SubnetBPublic
+      - !Ref SubnetCPublic
+      SecurityGroups:
+      - !Ref LoadBalancerSecurityGroup
+      Scheme: 'internet-facing'
+  LoadBalancerListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref LoadBalancerTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+      - CertificateArn: !Ref ElbAcmCertificate
+  LoadBalancerTargetGroup: # not monitored, but LoadBalancer is monitored!
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 15
+      HealthCheckPath: '/'
+      HealthCheckPort: '80'
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200-299'
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+      - Key: 'deregistration_delay.timeout_seconds'
+        Value: '30'
+  WebServerInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: '/'
+      Roles:
+      - !Ref WebServerIAMRole
+  WebServerIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'ec2.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Path: '/'
+      ManagedPolicyArns: !If [HasSystemsManagerAccess, ['arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM'], []] # TODO get rid of managed policy
+      Policies:
+      - PolicyName: logs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'logs:CreateLogStream'
+            - 'logs:PutLogEvents'
+            - 'logs:DescribeLogStreams'
+            Resource: !GetAtt 'WebServerLogs.Arn'
+  LaunchConfiguration:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Metadata:
+      'AWS::CloudFormation::Init':
+        configSets:
+          default: [awslogs, extras, config]
+        awslogs:
+          packages:
+            yum:
+              awslogs: []
+          files:
+            '/etc/awslogs/awscli.conf':
+              content: !Sub |
+                [default]
+                region = ${AWS::Region}
+                [plugins]
+                cwlogs = cwlogs
+              mode: '000644'
+              owner: root
+              group: root
+            '/etc/awslogs/awslogs.conf':
+              content: !Sub |
+                [general]
+                state_file = /var/lib/awslogs/agent-state
+                [/var/log/amazon/ssm/amazon-ssm-agent.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/amazon/ssm/amazon-ssm-agent.log
+                log_stream_name = {instance_id}/var/log/amazon/ssm/amazon-ssm-agent.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/amazon/ssm/errors.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/amazon/ssm/errors.log
+                log_stream_name = {instance_id}/var/log/amazon/ssm/errors.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/audit/audit.log]
+                file = /var/log/audit/audit.log
+                log_stream_name = {instance_id}/var/log/audit/audit.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/awslogs.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/awslogs.log
+                log_stream_name = {instance_id}/var/log/awslogs.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/boot.log]
+                file = /var/log/boot.log
+                log_stream_name = {instance_id}/var/log/boot.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cfn-hup.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-hup.log
+                log_stream_name = {instance_id}/var/log/cfn-hup.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cfn-init-cmd.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-init-cmd.log
+                log_stream_name = {instance_id}/var/log/cfn-init-cmd.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cfn-init.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-init.log
+                log_stream_name = {instance_id}/var/log/cfn-init.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cfn-wire.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/cfn-wire.log
+                log_stream_name = {instance_id}/var/log/cfn-wire.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cloud-init-output.log]
+                file = /var/log/cloud-init-output.log
+                log_stream_name = {instance_id}/var/log/cloud-init-output.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cloud-init.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cloud-init.log
+                log_stream_name = {instance_id}/var/log/cloud-init.log
+                log_group_name = ${WebServerLogs}
+                [/var/log/cron]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/cron
+                log_stream_name = {instance_id}/var/log/cron
+                log_group_name = ${WebServerLogs}
+                [/var/log/dmesg]
+                file = /var/log/dmesg
+                log_stream_name = {instance_id}/var/log/dmesg
+                log_group_name = ${WebServerLogs}
+                [/var/log/grubby_prune_debug]
+                file = /var/log/grubby_prune_debug
+                log_stream_name = {instance_id}/var/log/grubby_prune_debug
+                log_group_name = ${WebServerLogs}
+                [/var/log/maillog]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/maillog
+                log_stream_name = {instance_id}/var/log/maillog
+                log_group_name = ${WebServerLogs}
+                [/var/log/messages]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/messages
+                log_stream_name = {instance_id}/var/log/messages
+                log_group_name = ${WebServerLogs}
+                [/var/log/secure]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/secure
+                log_stream_name = {instance_id}/var/log/secure
+                log_group_name = ${WebServerLogs}
+                [/var/log/yum.log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/yum.log
+                log_stream_name = {instance_id}/var/log/yum.log
+                log_group_name = ${WebServerLogs}
+              mode: '000644'
+              owner: root
+              group: root
+            '/etc/awslogs/config/efs.conf':
+              content: !Sub |
+                [/var/log/amazon/efs/mount.log]
+                datetime_format = %Y-%m-%d %H:%M:%S
+                file = /var/log/amazon/efs/mount.log
+                log_stream_name = {instance_id}/var/log/amazon/efs/mount.log
+                log_group_name = ${WebServerLogs}
+              mode: '000644'
+              owner: root
+              group: root
+            '/etc/awslogs/config/httpd.conf':
+              content: !Sub |
+                [/var/log/httpd/access_log]
+                datetime_format = %b %d %H:%M:%S %Y
+                file = /var/log/httpd/access_log
+                log_stream_name = {instance_id}/var/log/httpd/access_log
+                log_group_name = ${WebServerLogs}
+                [/var/log/httpd/error_log]
+                datetime_format = %d/%b/%Y:%H:%M:%S %z
+                file = /var/log/httpd/error_log
+                log_stream_name = {instance_id}/var/log/httpd/error_log
+                log_group_name = ${WebServerLogs}
+              mode: '000644'
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              awslogsd:
+                enabled: true
+                ensureRunning: true
+                packages:
+                  yum:
+                  - awslogs
+                files:
+                - '/etc/awslogs/awslogs.conf'
+                - '/etc/awslogs/awscli.conf'
+                - '/etc/awslogs/config/efs.conf'
+                - '/etc/awslogs/config/httpd.conf'
+        extras:
+          commands:
+            a_enable_php:
+              command: 'amazon-linux-extras enable php7.2'
+              test: "! grep -Fxq '[amzn2extra-php7.2]' /etc/yum.repos.d/amzn2-extras.repo"
+        config:
+          packages:
+            yum:
+              php: []
+              php-gd: []
+              php-opcache: []
+              php-mysqlnd: []
+              php-mbstring: []
+              php-xmlrpc: []
+              mariadb: []
+              httpd: []
+          files:
+            '/root/php.sh':
+              content: |
+                #!/bin/bash -ex
+                sed -i 's/max_execution_time = 30/max_execution_time = 300/' /etc/php.ini
+                sed -i 's/max_input_time = 60/max_input_time = 300/' /etc/php.ini
+                sed -i 's/; max_input_vars = 1000/max_input_vars = 10000/' /etc/php.ini
+                sed -i 's/memory_limit = 128M/memory_limit = 512M/' /etc/php.ini
+                sed -i 's/post_max_size = 8M/post_max_size = 200M/' /etc/php.ini
+                sed -i 's/upload_max_filesize = 2M/upload_max_filesize = 200M/' /etc/php.ini
+                sed -i 's/max_file_uploads = 20/max_file_uploads = 200/' /etc/php.ini
+                sed -i 's/opcache.memory_consumption=128/opcache.memory_consumption=256/g' /etc/php.d/10-opcache.ini
+                sed -i 's/opcache.interned_strings_buffer=8/opcache.interned_strings_buffer=16/g' /etc/php.d/10-opcache.ini
+                sed -i 's/opcache.max_accelerated_files=4000/opcache.max_accelerated_files=10000/g' /etc/php.d/10-opcache.ini
+                sed -i 's/;opcache.max_wasted_percentage=5/opcache.max_wasted_percentage=10/g' /etc/php.d/10-opcache.ini
+                sed -i 's/;opcache.validate_timestamps=1/opcache.validate_timestamps=1/g' /etc/php.d/10-opcache.ini
+                sed -i 's/;opcache.revalidate_freq=2/opcache.revalidate_freq=60/g' /etc/php.d/10-opcache.ini
+                sed -i 's/;opcache.fast_shutdown=0/opcache.fast_shutdown=0/g' /etc/php.d/10-opcache.ini
+              mode: '000500'
+              owner: root
+              group: root
+            '/etc/httpd/conf.d/wordpress.conf':
+              content: |
+                <Directory "/var/www/html">
+                Options Indexes FollowSymLinks
+                AllowOverride All
+                Require all granted
+                </Directory>
+              mode: '000500'
+              owner: root
+              group: root
+            '/root/wordpress.sh':
+              content: !Sub
+              - |
+                  #!/bin/bash -ex
+                  # ensure than only one machine installs wp
+                  if mkdir /var/www/lock; then
+                    cd /var/www/html
+                    wget -q -T 60 https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+                    if ! php wp-cli.phar core is-installed --allow-root; then
+                      php wp-cli.phar core download --allow-root --version=4.9.8
+                      php wp-cli.phar core config --dbname='wordpress' --dbuser='wordpress' --dbpass='${DBMasterUserPassword}' --dbhost='${DBHost}' --allow-root
+                      php wp-cli.phar core install --url='https://${DomainName}' --title='${BlogTitle}' --admin_user='${BlogAdminUsername}' --admin_password='${BlogAdminPassword}' --admin_email='${BlogAdminEMail}' --skip-email --allow-root
+                      sed -i "/$table_prefix = 'wp_';/a\$_SERVER['HTTPS'] = 'on';" /var/www/html/wp-config.php
+                    fi
+                    chown -R apache:apache /var/www/html
+                    chmod u+wrx /var/www/html/wp-content/*
+                    rm -f wp-cli.phar
+                  fi
+              - BlogTitle: !Ref BlogTitle
+                BlogAdminUsername: !Ref BlogAdminUsername
+                BlogAdminPassword: !Ref BlogAdminPassword
+                BlogAdminEMail: !Ref BlogAdminEMail
+                DBMasterUserPassword: !Ref DBMasterUserPassword
+                DBHost: 'replace_me_db_host_url.endpoint' #TODO
+                DomainName: !Sub
+                - '${SubDomainNameWithDot}${PublicHostedZoneName}'
+                - SubDomainNameWithDot: !Ref SubDomainNameWithDot
+                  HostedZoneName: !Ref PublicHostedZoneName
+              mode: '000500'
+              owner: root
+              group: root
+          commands:
+            01_php:
+              command: '/root/php.sh'
+              cwd: '/var/www/html'
+            02_wordpress:
+              command: '/root/wordpress.sh'
+              cwd: '/var/www/html'
+          services:
+            sysvinit:
+              httpd:
+                enabled: true
+                ensureRunning: true
+              amazon-ssm-agent:
+                enabled: !If [HasSystemsManagerAccess, true, false]
+                ensureRunning: !If [HasSystemsManagerAccess, true, false]
+    Properties:
+      AssociatePublicIpAddress: true
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+      ImageId: !FindInMap [RegionMap, !Ref 'AWS::Region', AMI]
+      InstanceType: !Ref WebServerInstanceType
+      SecurityGroups:
+      - !Ref WebServerSecurityGroup
+      KeyName: !Ref WebServerKeyName
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash -ex
+          trap '/opt/aws/bin/cfn-signal -e 1 --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}' ERR
+          while ! (echo > /dev/tcp/${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com/2049) >/dev/null 2>&1; do sleep 10; done
+          sleep 10
+          mkdir /var/www
+          mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/" /var/www/
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchConfiguration --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource AutoScalingGroup --region ${AWS::Region}
+  AutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    DependsOn:
+    - EFSMountTargetA
+    - EFSMountTargetB
+    - EFSMountTargetC
+    Properties:
+      TargetGroupARNs:
+      - !Ref LoadBalancerTargetGroup
+      LaunchConfigurationName: !Ref LaunchConfiguration
+      MinSize: '2'
+      MaxSize: '4'
+      DesiredCapacity: '2'
+      Cooldown: '60'
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      VPCZoneIdentifier:
+      - !Ref SubnetAPublic
+      - !Ref SubnetBPublic
+      - !Ref SubnetCPublic
+      Tags:
+      - PropagateAtLaunch: true
+        Key: Name
+        Value: wordpress
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        PauseTime: PT10M
+        SuspendProcesses:
+        - HealthCheck
+        - ReplaceUnhealthy
+        - AZRebalance
+        - AlarmNotification
+        - ScheduledActions
+        WaitOnResourceSignals: true
+  ScalingUpPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      MinAdjustmentMagnitude: 1
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: '900'
+      ScalingAdjustment: 25
+  CPUHighAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: 60
+      AlarmDescription: 'Alarm if CPU load is high.'
+      Period: 300
+      AlarmActions:
+      - !Ref ScalingUpPolicy
+      Namespace: 'AWS/EC2'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+  ScalingDownPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: PercentChangeInCapacity
+      MinAdjustmentMagnitude: 1
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      Cooldown: '300'
+      ScalingAdjustment: -25
+  CPULowAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: 3
+      Statistic: Average
+      Threshold: 30
+      AlarmDescription: 'Alarm if CPU load is low.'
+      Period: 300
+      AlarmActions:
+      - !Ref ScalingDownPolicy
+      Namespace: 'AWS/EC2'
+      Dimensions:
+      - Name: AutoScalingGroupName
+        Value: !Ref AutoScalingGroup
+      ComparisonOperator: LessThanThreshold
+      MetricName: CPUUtilization
+  EFSFileSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      FileSystemTags:
+      - Key: Name
+        Value: !Sub '${AWS::StackName}-efs'
+  EFSMountTargetA:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref SubnetAPublic
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+  EFSMountTargetB:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref SubnetBPublic
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+  EFSMountTargetC:
+    Type: 'AWS::EFS::MountTarget'
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref SubnetCPublic
+      SecurityGroups:
+      - !Ref EFSSecurityGroup
+  EFSSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Allowing access to EFS
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 2049
+        ToPort: 2049
+        SourceSecurityGroupId: !Ref WebServerSecurityGroup
+  RecordSet:
+    Type: 'AWS::Route53::RecordSet'
+    Properties:
+      AliasTarget:
+        HostedZoneId: !Ref PublicHostedZoneId
+        DNSName: !GetAtt 'CloudFrontDistribution.DomainName'
+      HostedZoneId: !Ref PublicHostedZoneId
+      Name: !Sub
+      - '${SubDomainNameWithDot}${PublicHostedZoneName}'
+      - SubDomainNameWithDot: !Ref SubDomainNameWithDot
+        HostedZoneName: !Ref PublicHostedZoneName
+      Type: A
+  CloudFrontDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Aliases:
+        - !Sub
+          - '${SubDomainNameWithDot}${PublicHostedZoneName}'
+          - SubDomainNameWithDot: !Ref SubDomainNameWithDot
+            HostedZoneName: !Ref PublicHostedZoneName
+        Comment: !Sub
+        - '${SubDomainNameWithDot}${PublicHostedZoneName}'
+        - SubDomainNameWithDot: !Ref SubDomainNameWithDot
+          HostedZoneName: !Ref PublicHostedZoneName
+        Origins:
+        - DomainName: !GetAtt 'LoadBalancer.DNSName'
+          Id: elb
+          CustomOriginConfig:
+            OriginProtocolPolicy: 'https-only'
+            OriginReadTimeout: 60
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          DefaultTTL: 0
+          MaxTTL: 0
+          MinTTL: 0
+          ForwardedValues:
+            QueryString: true
+            Headers:
+            - '*'
+            Cookies:
+              Forward: all
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        CacheBehaviors:
+        - PathPattern: wp-includes/*
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          DefaultTTL: 900
+          MaxTTL: 900
+          MinTTL: 900
+          ForwardedValues:
+            QueryString: true
+            Headers:
+            - 'Host'
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: wp-content/*
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          DefaultTTL: 900
+          MaxTTL: 900
+          MinTTL: 900
+          ForwardedValues:
+            QueryString: true
+            Headers:
+            - 'Host'
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        Enabled: true
+        HttpVersion: http2
+        PriceClass: 'PriceClass_All'
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CloudFrontAcmCertificate
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: TLSv1
+Outputs:
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
+  CloudFrontID:
+    Description: 'The ID of the CloudFront distribution.'
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontARN'
+  CloudFrontDomainName:
+    Description: 'The domain name of the CloudFront distribution.'
+    Value: !Sub ${CloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFrontDomainName'
