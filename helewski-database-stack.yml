@@ -1,0 +1,79 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Helewski Nested Database Stack
+Parameters:
+  EnvironmentName:
+    Type: String
+  VpcId:
+    Type: String
+  SubnetAPrivate:
+    Type: String
+  SubnetBPrivate:
+    Type: String
+  SubnetCPrivate:
+    Type: String
+  WebServerSecurityGroup:
+    Type: String
+  DBServerInstanceType:
+    Description: 'The instance type of database server (e.g. db.t2.small).'
+    Type: String
+    Default: 'db.t2.small'
+  DBBackupRetentionPeriod:
+    Description: 'The number of days to keep snapshots of the database.'
+    Type: Number
+    Default: 30
+  DBMasterUserPassword:
+    Description: 'The master password for the DB instance. Must not be changed!'
+    Type: String
+    Default: wordpress
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 32
+Resources:
+  DatabaseSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'wordpress-rds'
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        SourceSecurityGroupId: !Ref WebServerSecurityGroup
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: 'DB subnet group'
+      SubnetIds:
+      - !Ref SubnetAPrivate
+      - !Ref SubnetBPrivate
+      - !Ref SubnetCPrivate
+  DatabaseCluster:
+    Type: 'AWS::RDS::DBCluster'
+    Properties:
+      BackupRetentionPeriod: !Ref DBBackupRetentionPeriod
+      DatabaseName: wordpress
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: aurora
+      MasterUsername: wordpress
+      MasterUserPassword: !Ref DBMasterUserPassword
+      VpcSecurityGroupIds:
+      - !Ref DatabaseSecurityGroup
+  DatabaseA:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBClusterIdentifier: !Ref DatabaseCluster
+      DBInstanceClass: !Ref DBServerInstanceType
+      Engine: aurora
+      DBSubnetGroupName: !Ref DBSubnetGroup
+  DatabaseB:
+    Type: 'AWS::RDS::DBInstance'
+    Properties:
+      DBClusterIdentifier: !Ref DatabaseCluster
+      DBInstanceClass: !Ref DBServerInstanceType
+      Engine: aurora
+      DBSubnetGroupName: !Ref DBSubnetGroup
+Outputs:
+  StackName:
+    Description: 'Stack name.'
+    Value: !Sub '${AWS::StackName}'
